@@ -57,7 +57,7 @@ public class LogminerService {
 					public void run() {
 						BufferedReader reader = new BufferedReader(new InputStreamReader(connectorStartProcess.getInputStream()));
 						reader.lines().forEach(line -> {
-							//							LOG.info("********"+line);
+							LOG.info(line);
 							if (line.contains("INFO Kafka startTimeMs")) {
 								connectorStartFinished.set(true);
 								LOG.info("@@@@@@@@   connectorStartFinished set true");
