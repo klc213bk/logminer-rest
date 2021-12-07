@@ -9,6 +9,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.sql.CallableStatement;
 import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -52,28 +54,28 @@ public class LogminerService {
 
 	@Value("${tglminer.db.password}")
 	private String tglminerDbPassword;
-	
+
 	@Value("${connector.name}")
 	private String connectorName;
-	
+
 	@Value("${connect.rest.port}")
 	private String connectRestPort;
-	
+
 	@Value("${connect.rest.url}")
 	private String connectRestUrl;
-	
+
 	@Value("${connector.start.script}")
 	private String connectorStartScript;
-	
+
 	private Process connectorStartProcess;
 	private ExecutorService connectorStartExecutor;
 	private AtomicBoolean connectorStartFinished = new AtomicBoolean(false);
 	private AtomicBoolean connectorStopFinished = new AtomicBoolean(false);
-	
+
 	private BasicDataSource tglminerConnPool;
-	
+
 	private ExecutorService executor;
-	
+
 	@PreDestroy
 	public void destroy() {
 		LOG.info(">>>> PreDestroy Kafka Service....");
@@ -86,7 +88,7 @@ public class LogminerService {
 				LOG.info(">>>>>>>>>>>> connectorStartProcess.isAlive={} ", (connectorStartProcess == null)? null : connectorStartProcess.isAlive());
 				connectorStartFinished.set(false);
 				ProcessBuilder builder = new ProcessBuilder();
-			//	String script = "./start-connector.sh";
+				//	String script = "./start-connector.sh";
 				//builder.command("sh", "-c", script);
 				builder.command(connectorStartScript);
 
@@ -175,22 +177,22 @@ public class LogminerService {
 		LOG.info(">>> ApplyLogminerSync={}", ToStringBuilder.reflectionToString(applySync));
 		Map<String,String>  configmap = getConnectorConfig(connectorName);
 		LOG.info(">>> original configmap={}", configmap);
-		
+
 		LOG.info(">>> updatedConnectorConfigMap");
-		
+
 		String[] tableArr = applySync.getTableListStr().split(",");
 		List<String> tableList = Arrays.asList(tableArr);
 		Set<String> tableSet = new HashSet<>(tableList);
-		
-		updatedConnectorConfigMap(configmap, applySync.getResetOffset(), applySync.getApplyOrDrop(), tableSet);
-		
-		LOG.info(">>> updated configmap={}", configmap);
-		
-//		LOG.info(">>>> pause connector");
-//		pauseConnector(connectorName);
 
-//		LOG.info(">>>> delete connector");
-//		deleteConnector(connectorName);
+		updatedConnectorConfigMap(configmap, applySync.getResetOffset(), applySync.getApplyOrDrop(), tableSet);
+
+		LOG.info(">>> updated configmap={}", configmap);
+
+		LOG.info(">>>> pause connector");
+		pauseConnector(connectorName);
+
+		//		LOG.info(">>>> delete connector");
+		//		deleteConnector(connectorName);
 
 		LOG.info(">>>> add sync table to config's whitelist");
 
@@ -198,13 +200,50 @@ public class LogminerService {
 		boolean result =createConnector(connectorName, configmap);
 		LOG.info(">>>> create connector result={}", result);
 
-		String status = getConnectorStatus(connectorName);
 
+		LOG.info(">>>> resume connector");
+		resumeConnector(connectorName);
+
+
+		String status = getConnectorStatus(connectorName);
 		LOG.info(">>>> connector status={}", status);
+
+		// update logminer offset status
 		
+		
+		
+		Connection conn = null;
+		PreparedStatement pstmt = null;
+		String sql = null;
+		try {
+			Class.forName(tglminerDbDriver);
+			conn = DriverManager.getConnection(tglminerDbUrl, tglminerDbUsername, tglminerDbPassword);
+
+			ObjectMapper mapper = new ObjectMapper();
+			mapper.writeValueAsString(configmap);
+			
+			
+			sql = "update TM_LOGMINER_OFFSET SET TABLE_WHITE_LIST=?,KAFKA_TOPICS=?,STATUS=? where start_time = \n" +
+					" (select start_time from TM_LOGMINER_OFFSET order by start_time desc \n" +
+					" fetch next 1 row only)";
+			
+			pstmt = conn.prepareStatement(sql);
+			pstmt.setString(1, mapper.writeValueAsString(configmap));
+			pstmt.setString(2, "");
+			pstmt.setString(3, status);
+			pstmt.executeUpdate();
+			pstmt.close();
+		} finally {
+			if (pstmt != null) pstmt.close();
+			if (conn != null) conn.close();
+		}
+
+
+
 		return status;
-		
+
 	}
+	
 	public String getConnectorStatus(String connector) throws Exception {
 		String urlStr = connectRestUrl+"/connectors/" + connector+ "/status";
 		HttpURLConnection httpCon = null;
@@ -248,8 +287,8 @@ public class LogminerService {
 		}
 	}
 	public Map<String,String> getConnectorConfig(String connectorName) throws Exception {
-		
-		
+
+
 		Map<String,String> configmap = new HashMap<>();
 		String urlStr = String.format(connectRestUrl+"/connectors/%s/config", connectorName);
 		LOG.info(">>>>>>>>>>>> urlStr={} ", urlStr);
@@ -279,7 +318,7 @@ public class LogminerService {
 
 	}
 	public void updatedConnectorConfigMap(Map<String,String> configmap, Boolean resetOffset, int applyOrDrop, Set<String> tableSet) throws Exception {
-		
+
 		LOG.info(">>>> configmap={}", configmap);
 
 		if (Boolean.TRUE.equals(resetOffset)) {
@@ -319,6 +358,42 @@ public class LogminerService {
 	}
 	public boolean pauseConnector(String connectorName) throws Exception{
 		String urlStr = connectRestUrl + "/connectors/" + connectorName + "/pause";
+		LOG.info(">>>>> connector urlStr:" + urlStr);
+
+		HttpURLConnection httpConn = null;
+		//		DataOutputStream dataOutStream = null;
+		int responseCode = -1;
+		try {
+			URL url = new URL(urlStr);
+			httpConn = (HttpURLConnection)url.openConnection();
+			httpConn.setRequestMethod("PUT");
+
+			responseCode = httpConn.getResponseCode();
+			LOG.info(">>>>> pause responseCode={}",responseCode);
+
+			String readLine = null;
+
+			BufferedReader in = new BufferedReader(new InputStreamReader(httpConn.getInputStream(), "UTF-8"));
+			StringBuffer response = new StringBuffer();
+			while ((readLine = in.readLine()) != null) {
+				response.append(readLine);
+			}
+			in.close();
+
+			LOG.info(">>>>> pause response={}",response.toString());
+
+			if (202 == responseCode) {
+				return true;
+			} else {
+				return false;
+			}
+		} finally {
+
+			if (httpConn != null )httpConn.disconnect();
+		}
+	}
+	public boolean resumeConnector(String connectorName) throws Exception{
+		String urlStr = connectRestUrl + "/connectors/" + connectorName + "/resume";
 		LOG.info(">>>>> connector urlStr:" + urlStr);
 
 		HttpURLConnection httpConn = null;
@@ -450,69 +525,7 @@ public class LogminerService {
 
 		}
 	}
-	public boolean logStatus() throws Exception {
-		LOG.info(">>>>>>>>>>>> logStatus...");
-		boolean result = true;
 
-		if (tglminerConnPool == null) {
-			tglminerConnPool = getConnectionPool();
-		}
-
-		executor = Executors.newSingleThreadExecutor();
-		executor.submit(new Runnable() {
-
-			@Override
-			public void run() {
-
-				try {
-					while (true) {
-						logStatus();
-						Thread.sleep(30000);
-					}
-				} catch (Exception e) {
-					LOG.error(">>>>> Error!!!, error msg={}, stacetrace={}", ExceptionUtils.getMessage(e), ExceptionUtils.getStackTrace(e));
-				}
-			}
-			private Long logStatus() throws Exception{
-				Connection conn = null;
-				CallableStatement cstmt = null;
-
-				try {	
-//					conn = tglminerConnPool.getConnection();
-//					sql = "update TM_LOGMINER_OFFSET set "
-//					cstmt = conn.prepareCall("{call SP_INS_HEALTH_HEARTBEAT(?)}");
-
-					long currMillis = System.currentTimeMillis();
-//					cstmt.setTimestamp(1, new Timestamp(currMillis));
-//					cstmt.execute();
-
-					return currMillis;
-
-				} catch (Exception e1) {
-					LOG.error(">>>>> Error!!!, error msg={}, stacetrace={}", ExceptionUtils.getMessage(e1), ExceptionUtils.getStackTrace(e1));
-					throw e1;
-				} finally {
-					if (cstmt != null) cstmt.close();
-					if (conn != null) conn.close();
-				}
-
-			}
-		});
-
-
-		Runtime.getRuntime().addShutdownHook(new Thread() {
-			@Override
-			public void run() {
-
-				stopHeartbeat();
-
-			}
-		});
-
-		return result;
-
-
-	}
 	public boolean stopHeartbeat() {
 		LOG.info(">>>>>>>>>>>> stopHeartbeat ");
 		boolean result = true;
@@ -545,14 +558,5 @@ public class LogminerService {
 
 		return result;
 	}
-	private BasicDataSource getConnectionPool() {
-		BasicDataSource connPool = new BasicDataSource();
-		connPool.setUrl(tglminerDbUrl);
-		connPool.setDriverClassName(tglminerDbDriver);
-		connPool.setUsername(tglminerDbUsername);
-		connPool.setPassword(tglminerDbPassword);
-		connPool.setMaxTotal(2);
 
-		return connPool;
-	}
 }
