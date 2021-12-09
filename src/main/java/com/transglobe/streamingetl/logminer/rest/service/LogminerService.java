@@ -81,6 +81,44 @@ public class LogminerService {
 		LOG.info(">>>> PreDestroy Kafka Service....");
 
 	}
+	public void updateTMLogminerOffset() throws Exception {
+		
+		Connection conn = null;
+		PreparedStatement pstmt = null;
+		String sql = null;
+		try {
+			
+			String connectorStatus = getConnectorStatus(connectorName);
+			
+			Map<String,String>  configmap = getConnectorConfig(connectorName);
+			ObjectMapper mapper = new ObjectMapper();
+			String configmapStr = mapper.writeValueAsString(configmap);
+			 
+			Set<String> topicSet = TopicUtils.listTopics();
+			String topicSetStr = String.join(",", topicSet);
+			
+			Class.forName(tglminerDbDriver);
+			conn = DriverManager.getConnection(tglminerDbUrl, tglminerDbUsername, tglminerDbPassword);
+
+			sql = "update TM_LOGMINER_OFFSET SET TABLE_WHITE_LIST=?,KAFKA_TOPICS=?,STATUS=? where start_time = \n" +
+					" (select start_time from TM_LOGMINER_OFFSET order by start_time desc \n" +
+					" fetch next 1 row only)";
+			
+			pstmt = conn.prepareStatement(sql);
+			pstmt.setString(1, configmapStr);
+			pstmt.setString(2, topicSetStr);
+			pstmt.setString(3, connectorStatus);
+			pstmt.executeUpdate();
+			pstmt.close();
+		} finally {
+			if (pstmt != null) pstmt.close();
+			if (conn != null) conn.close();
+		}
+		
+		 
+		 
+		
+	}
 	public void startConnector() throws Exception {
 		LOG.info(">>>>>>>>>>>> logminerService.startConnector starting");
 		try {
@@ -173,7 +211,7 @@ public class LogminerService {
 
 		LOG.info(">>> Logminer  connector Stopped !!");
 	}
-	public String applyLogminerSync(ApplyLogminerSync applySync) throws Exception {
+	public Boolean applyLogminerSync(ApplyLogminerSync applySync) throws Exception {
 		LOG.info(">>> ApplyLogminerSync={}", ToStringBuilder.reflectionToString(applySync));
 		Map<String,String>  configmap = getConnectorConfig(connectorName);
 		LOG.info(">>> original configmap={}", configmap);
@@ -188,8 +226,8 @@ public class LogminerService {
 
 		LOG.info(">>> updated configmap={}", configmap);
 
-		LOG.info(">>>> pause connector");
-		pauseConnector(connectorName);
+//		LOG.info(">>>> pause connector");
+//		pauseConnector(connectorName);
 
 		//		LOG.info(">>>> delete connector");
 		//		deleteConnector(connectorName);
@@ -197,51 +235,11 @@ public class LogminerService {
 		LOG.info(">>>> add sync table to config's whitelist");
 
 		LOG.info(">>>> create connector");
-		boolean result =createConnector(connectorName, configmap);
+		Boolean result =createConnector(connectorName, configmap);
 		LOG.info(">>>> create connector result={}", result);
 
 
-		LOG.info(">>>> resume connector");
-		resumeConnector(connectorName);
-
-
-		String status = getConnectorStatus(connectorName);
-		LOG.info(">>>> connector status={}", status);
-
-		// update logminer offset status
-		
-		
-		
-		Connection conn = null;
-		PreparedStatement pstmt = null;
-		String sql = null;
-		try {
-			Class.forName(tglminerDbDriver);
-			conn = DriverManager.getConnection(tglminerDbUrl, tglminerDbUsername, tglminerDbPassword);
-
-			ObjectMapper mapper = new ObjectMapper();
-			mapper.writeValueAsString(configmap);
-			
-			
-			sql = "update TM_LOGMINER_OFFSET SET TABLE_WHITE_LIST=?,KAFKA_TOPICS=?,STATUS=? where start_time = \n" +
-					" (select start_time from TM_LOGMINER_OFFSET order by start_time desc \n" +
-					" fetch next 1 row only)";
-			
-			pstmt = conn.prepareStatement(sql);
-			pstmt.setString(1, mapper.writeValueAsString(configmap));
-			pstmt.setString(2, "");
-			pstmt.setString(3, status);
-			pstmt.executeUpdate();
-			pstmt.close();
-		} finally {
-			if (pstmt != null) pstmt.close();
-			if (conn != null) conn.close();
-		}
-
-
-
-		return status;
-
+		return result;
 	}
 	
 	public String getConnectorStatus(String connector) throws Exception {

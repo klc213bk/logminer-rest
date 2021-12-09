@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -41,6 +42,9 @@ public class LogminerController {
 
 		try {
 			logminerService.startConnector();
+			
+			logminerService.updateTMLogminerOffset();
+			
 			objectNode.put("returnCode", "0000");
 		} catch (Exception e) {
 			String errMsg = ExceptionUtils.getMessage(e);
@@ -88,10 +92,12 @@ public class LogminerController {
 		try {
 //			LOG.info(">>>>applySync={}", ToStringBuilder.reflectionToString(applySync));
 			
-			String status = logminerService.applyLogminerSync(applySync);
+			Boolean result = logminerService.applyLogminerSync(applySync);
+			
+			logminerService.updateTMLogminerOffset();
 			
 			objectNode.put("returnCode", "0000");
-			objectNode.put("status", status);
+			objectNode.put("status", (result == null)? Boolean.FALSE.toString() : result.toString());
 		} catch (Exception e) {
 			String errMsg = ExceptionUtils.getMessage(e);
 			String stackTrace = ExceptionUtils.getStackTrace(e);
@@ -105,4 +111,5 @@ public class LogminerController {
 		
 		return new ResponseEntity<Object>(objectNode, HttpStatus.OK);
 	}
+	
 }
