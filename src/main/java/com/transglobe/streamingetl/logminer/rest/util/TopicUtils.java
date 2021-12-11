@@ -1,4 +1,4 @@
-package com.transglobe.streamingetl.logminer.rest.service;
+package com.transglobe.streamingetl.logminer.rest.util;
 
 import java.util.HashSet;
 import java.util.List;

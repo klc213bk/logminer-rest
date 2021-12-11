@@ -37,6 +37,7 @@ import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.transglobe.streamingetl.logminer.rest.bean.ApplyLogminerSync;
+import com.transglobe.streamingetl.logminer.rest.util.TopicUtils;
 
 
 @Service
@@ -66,8 +67,13 @@ public class LogminerService {
 
 	@Value("${connector.start.script}")
 	private String connectorStartScript;
+	
+	@Value("${connector.start.reset.script}")
+	private String connectorStartResetScript;
 
 	private Process connectorStartProcess;
+	private Process connectorStopProcess;
+
 	private ExecutorService connectorStartExecutor;
 	private AtomicBoolean connectorStartFinished = new AtomicBoolean(false);
 	private AtomicBoolean connectorStopFinished = new AtomicBoolean(false);
@@ -78,48 +84,52 @@ public class LogminerService {
 
 	@PreDestroy
 	public void destroy() {
-		LOG.info(">>>> PreDestroy Kafka Service....");
+		LOG.info(">>>> PreDestroy Connector Service....");
+		destroyConnector();
 
 	}
-	public void updateTMLogminerOffset() throws Exception {
-		
-		Connection conn = null;
-		PreparedStatement pstmt = null;
-		String sql = null;
-		try {
-			
-			String connectorStatus = getConnectorStatus(connectorName);
-			
-			Map<String,String>  configmap = getConnectorConfig(connectorName);
-			ObjectMapper mapper = new ObjectMapper();
-			String configmapStr = mapper.writeValueAsString(configmap);
-			 
-			Set<String> topicSet = TopicUtils.listTopics();
-			String topicSetStr = String.join(",", topicSet);
-			
-			Class.forName(tglminerDbDriver);
-			conn = DriverManager.getConnection(tglminerDbUrl, tglminerDbUsername, tglminerDbPassword);
-
-			sql = "update TM_LOGMINER_OFFSET SET TABLE_WHITE_LIST=?,KAFKA_TOPICS=?,STATUS=? where start_time = \n" +
-					" (select start_time from TM_LOGMINER_OFFSET order by start_time desc \n" +
-					" fetch next 1 row only)";
-			
-			pstmt = conn.prepareStatement(sql);
-			pstmt.setString(1, configmapStr);
-			pstmt.setString(2, topicSetStr);
-			pstmt.setString(3, connectorStatus);
-			pstmt.executeUpdate();
-			pstmt.close();
-		} finally {
-			if (pstmt != null) pstmt.close();
-			if (conn != null) conn.close();
-		}
-		
-		 
-		 
-		
-	}
+//	public void updateTMLogminerOffset() throws Exception {
+//
+//		Connection conn = null;
+//		PreparedStatement pstmt = null;
+//		String sql = null;
+//		try {
+//
+//			String connectorStatus = getConnectorStatus(connectorName);
+//
+//			Map<String,String>  configmap = getConnectorConfig(connectorName);
+//			ObjectMapper mapper = new ObjectMapper();
+//			String configmapStr = mapper.writeValueAsString(configmap);
+//
+//			Set<String> topicSet = TopicUtils.listTopics();
+//			String topicSetStr = String.join(",", topicSet);
+//
+//			Class.forName(tglminerDbDriver);
+//			conn = DriverManager.getConnection(tglminerDbUrl, tglminerDbUsername, tglminerDbPassword);
+//
+//			sql = "update TM_LOGMINER_OFFSET SET TABLE_WHITE_LIST=?,KAFKA_TOPICS=?,STATUS=? where start_time = \n" +
+//					" (select start_time from TM_LOGMINER_OFFSET order by start_time desc \n" +
+//					" fetch next 1 row only)";
+//
+//			pstmt = conn.prepareStatement(sql);
+//			pstmt.setString(1, configmapStr);
+//			pstmt.setString(2, topicSetStr);
+//			pstmt.setString(3, connectorStatus);
+//			pstmt.executeUpdate();
+//			pstmt.close();
+//		} finally {
+//			if (pstmt != null) pstmt.close();
+//			if (conn != null) conn.close();
+//		}
+//
+//
+//
+//
+//	}
 	public void startConnector() throws Exception {
+		startConnector(false);
+	}
+	public void startConnector(boolean resetOffset) throws Exception {
 		LOG.info(">>>>>>>>>>>> logminerService.startConnector starting");
 		try {
 			if (connectorStartProcess == null || !connectorStartProcess.isAlive()) {
@@ -128,8 +138,11 @@ public class LogminerService {
 				ProcessBuilder builder = new ProcessBuilder();
 				//	String script = "./start-connector.sh";
 				//builder.command("sh", "-c", script);
-				builder.command(connectorStartScript);
-
+				if (resetOffset) {
+					builder.command(connectorStartResetScript);
+				} else {
+					builder.command(connectorStartScript);
+				}
 				builder.directory(new File("."));
 				connectorStartProcess = builder.start();
 
@@ -141,7 +154,7 @@ public class LogminerService {
 						BufferedReader reader = new BufferedReader(new InputStreamReader(connectorStartProcess.getInputStream()));
 						reader.lines().forEach(line -> {
 							LOG.info(line);
-							if (line.contains("INFO Kafka startTimeMs")) {
+							if (line.contains("Producer clientId=connector-producer-oracle-logminer-connector-0")) {
 								connectorStartFinished.set(true);
 								LOG.info("@@@@@@@@   connectorStartFinished set true");
 							}  else if (line.contains("Kafka Connect stopped")) {
@@ -155,7 +168,7 @@ public class LogminerService {
 
 				while (!connectorStartFinished.get()) {
 					LOG.info(">>>>>>WAITING 1 sec FOR FINISH");
-					Thread.sleep(1000);
+					Thread.sleep(10000);
 				}
 
 				LOG.info(">>>>>>>>>>>> LogminerService.startConnector End");
@@ -168,47 +181,48 @@ public class LogminerService {
 		} 
 	}
 	public void stopConnector() throws Exception {
-		LOG.info(">>>>>>>>>>>> stopConnector");
-		if (connectorStartProcess == null) {
-			LOG.warn(">>>>>>>>>>>> connectorStartProcess is null, Cannot stop !!!");
-		} else {
-			if (connectorStartProcess.isAlive()) {
-				connectorStartProcess.destroy();
-				connectorStartExecutor.shutdown();
-				if (!connectorStartExecutor.isTerminated()) {
-					connectorStartExecutor.shutdownNow();
+		if (connectorStopProcess == null || !connectorStopProcess.isAlive()) {
+			LOG.info(">>>>>>>>>>>> connectorStopProcess.isAlive={} ", (connectorStopProcess == null)? null : connectorStopProcess.isAlive());
+			connectorStopFinished.set(false);
 
-					try {
-						connectorStartExecutor.awaitTermination(180, TimeUnit.SECONDS);
-					} catch (InterruptedException e) {
-						LOG.error(">>> ERROR!!!, msg={}, stacetrace={}",
-								ExceptionUtils.getMessage(e), ExceptionUtils.getStackTrace(e));
-					}
+			// kill process
+			ProcessBuilder builder = new ProcessBuilder();
+			String script = String.format("kill -9 $(lsof -t -i:%d -sTCP:LISTEN)", Integer.valueOf(connectRestPort));
+			LOG.info(">>> stop script={}", script);
 
-				}
+			builder.command("bash", "-c", script);
+			//builder.command(script);
 
+			//	builder.directory(new File(streamingetlHome));
+			connectorStopProcess = builder.start();
+			int exitVal = connectorStopProcess.waitFor();
+			if (exitVal == 0) {
+				LOG.info(">>> Success!!! kill Logminer connector");
+				connectorStopFinished.set(true);
 			} else {
-				LOG.info(">>> connector is NOT alive, cannot stop");
+				connectorStopFinished.set(true);
+				LOG.error(">>> Error!!! kill Logminer  connector, exitcode={}", exitVal);
 			}
-		}
 
-		// kill process
-		ProcessBuilder builder = new ProcessBuilder();
-		String script = String.format("kill -9 $(lsof -t -i:%d -sTCP:LISTEN)", Integer.valueOf(connectRestPort));
-		LOG.info(">>> stop script={}", script);
+			long t0 = System.currentTimeMillis();
+			while (!connectorStopFinished.get()) {
+				LOG.info(">>>>>>WAITING 1 sec FOR FINISH");
+				Thread.sleep(1000);
 
-		builder.command("bash", "-c", script);
-		//builder.command(script);
+				long t1 = System.currentTimeMillis();
 
-		//	builder.directory(new File(streamingetlHome));
-		Process logminerShutdownProcess = builder.start();
-		int exitVal = logminerShutdownProcess.waitFor();
-		if (exitVal == 0) {
-			LOG.info(">>> Success!!! kill Logminer connector");
+				if ((t1 - t0) > 60 * 1000) {
+					break;
+				}
+			}
+
+			if (!connectorStopProcess.isAlive()) {
+				connectorStopProcess.destroy();
+			}
+
 		} else {
-			LOG.error(">>> Error!!! kill Logminer  connector, exitcode={}", exitVal);
+			LOG.warn(" >>> kafkaStopProcess is currently Running.");
 		}
-
 		LOG.info(">>> Logminer  connector Stopped !!");
 	}
 	public Boolean applyLogminerSync(ApplyLogminerSync applySync) throws Exception {
@@ -226,8 +240,8 @@ public class LogminerService {
 
 		LOG.info(">>> updated configmap={}", configmap);
 
-//		LOG.info(">>>> pause connector");
-//		pauseConnector(connectorName);
+		//		LOG.info(">>>> pause connector");
+		//		pauseConnector(connectorName);
 
 		//		LOG.info(">>>> delete connector");
 		//		deleteConnector(connectorName);
@@ -241,7 +255,7 @@ public class LogminerService {
 
 		return result;
 	}
-	
+
 	public String getConnectorStatus(String connector) throws Exception {
 		String urlStr = connectRestUrl+"/connectors/" + connector+ "/status";
 		HttpURLConnection httpCon = null;
@@ -321,7 +335,7 @@ public class LogminerService {
 
 		if (Boolean.TRUE.equals(resetOffset)) {
 			configmap.put("reset.offset", "true");
-		} else {
+		} else if (Boolean.FALSE.equals(resetOffset)) {
 			configmap.put("reset.offset", "false");
 		}
 
@@ -365,6 +379,42 @@ public class LogminerService {
 			URL url = new URL(urlStr);
 			httpConn = (HttpURLConnection)url.openConnection();
 			httpConn.setRequestMethod("PUT");
+
+			responseCode = httpConn.getResponseCode();
+			LOG.info(">>>>> pause responseCode={}",responseCode);
+
+			String readLine = null;
+
+			BufferedReader in = new BufferedReader(new InputStreamReader(httpConn.getInputStream(), "UTF-8"));
+			StringBuffer response = new StringBuffer();
+			while ((readLine = in.readLine()) != null) {
+				response.append(readLine);
+			}
+			in.close();
+
+			LOG.info(">>>>> pause response={}",response.toString());
+
+			if (202 == responseCode) {
+				return true;
+			} else {
+				return false;
+			}
+		} finally {
+
+			if (httpConn != null )httpConn.disconnect();
+		}
+	}
+	public boolean restartConnector() throws Exception{
+		String urlStr = connectRestUrl + "/connectors/" + connectorName + "/restart?includeTasks=true";
+		LOG.info(">>>>> connector urlStr:" + urlStr);
+
+		HttpURLConnection httpConn = null;
+		//		DataOutputStream dataOutStream = null;
+		int responseCode = -1;
+		try {
+			URL url = new URL(urlStr);
+			httpConn = (HttpURLConnection)url.openConnection();
+			httpConn.setRequestMethod("POST");
 
 			responseCode = httpConn.getResponseCode();
 			LOG.info(">>>>> pause responseCode={}",responseCode);
@@ -524,37 +574,48 @@ public class LogminerService {
 		}
 	}
 
-	public boolean stopHeartbeat() {
-		LOG.info(">>>>>>>>>>>> stopHeartbeat ");
-		boolean result = true;
-		if (executor != null) {
+	private void destroyConnector() {
+		if (connectorStartProcess != null) {
+			LOG.warn(" >>> connectorStartProcess ");
+			LOG.warn(" >>> connectorStartProcess is aliv= {}", connectorStartProcess.isAlive());
+			if (connectorStartProcess.isAlive()) {
+				LOG.warn(" >>> destroy connectorStartProcess .");
+				connectorStartProcess.destroy();
 
-			try {
-				if (tglminerConnPool != null) tglminerConnPool.close();
-			} catch (Exception e) {
-				result = false;
-				LOG.error(">>>message={}, stack trace={}", e.getMessage(), ExceptionUtils.getStackTrace(e));
 			}
+		}
+		if (connectorStopProcess != null) {
+			LOG.warn(" >>> connectorStopProcess ");
+			LOG.warn(" >>> connectorStopProcess is aliv= {}", connectorStopProcess.isAlive());
+			if (connectorStopProcess.isAlive()) {
+				LOG.warn(" >>> destroy connectorStopProcess .");
+				connectorStopProcess.destroy();
 
-			executor.shutdown();
-			if (!executor.isTerminated()) {
-				executor.shutdownNow();
+			}
+		}
+		LOG.warn(" >>> connectorStartExecutor ...", connectorStartExecutor);
+		if (connectorStartExecutor != null) {
+			LOG.warn(" >>> shutdown connectorStartExecutor .");
+
+			connectorStartExecutor.shutdown();
+
+			LOG.warn(" >>> connectorStartExecutor isTerminated={} ", connectorStartExecutor.isTerminated());
+
+			if (!connectorStartExecutor.isTerminated()) {
+				LOG.warn(" >>> shutdownNow connectorStartExecutor .");
+				connectorStartExecutor.shutdownNow();
 
 				try {
-					executor.awaitTermination(300, TimeUnit.SECONDS);
+					LOG.warn(" >>> awaitTermination connectorStartExecutor .");
+					connectorStartExecutor.awaitTermination(600, TimeUnit.SECONDS);
 				} catch (InterruptedException e) {
-					result = false;
 					LOG.error(">>> ERROR!!!, msg={}, stacetrace={}",
 							ExceptionUtils.getMessage(e), ExceptionUtils.getStackTrace(e));
 				}
 
 			}
-
 		}
 
-		LOG.info(">>>>>>>>>>>> stopHeartbeat done !!!");
-
-		return result;
 	}
 
 }
