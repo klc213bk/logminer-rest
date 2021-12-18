@@ -44,6 +44,8 @@ import com.transglobe.streamingetl.logminer.rest.util.TopicUtils;
 public class LogminerService {
 	static final Logger LOG = LoggerFactory.getLogger(LogminerService.class);
 
+	static final int KAFKA_CONNECT_PORT = 8083;
+	
 	@Value("${tglminer.db.driver}")
 	private String tglminerDbDriver;
 
@@ -154,21 +156,21 @@ public class LogminerService {
 						BufferedReader reader = new BufferedReader(new InputStreamReader(connectorStartProcess.getInputStream()));
 						reader.lines().forEach(line -> {
 							LOG.info(line);
-							if (line.contains("Producer clientId=connector-producer-oracle-logminer-connector-0")) {
-								connectorStartFinished.set(true);
-								LOG.info("@@@@@@@@   connectorStartFinished set true");
-							}  else if (line.contains("Kafka Connect stopped")) {
-								connectorStopFinished.set(true);
-								LOG.info("@@@@@@@@   connectorStopFinished set true");
-							}
+//							if (line.contains("Producer clientId=connector-producer-oracle-logminer-connector-0")) {
+//								connectorStartFinished.set(true);
+//								LOG.info("@@@@@@@@   connectorStartFinished set true");
+//							}  else if (line.contains("Kafka Connect stopped")) {
+//								connectorStopFinished.set(true);
+//								LOG.info("@@@@@@@@   connectorStopFinished set true");
+//							}
 						});
 					}
 
 				});
 
-				while (!connectorStartFinished.get()) {
-					LOG.info(">>>>>>WAITING 1 sec FOR FINISH");
-					Thread.sleep(10000);
+				while (!checkPortListening(KAFKA_CONNECT_PORT)) {
+					Thread.sleep(1000);
+					LOG.info(">>>> Sleep for 1 second");;
 				}
 
 				LOG.info(">>>>>>>>>>>> LogminerService.startConnector End");
@@ -573,7 +575,53 @@ public class LogminerService {
 
 		}
 	}
+	private boolean checkPortListening(int port) throws Exception {
+		LOG.info(">>>>>>>>>>>> checkPortListening:{} ", port);
 
+		BufferedReader reader = null;
+		try {
+			ProcessBuilder builder = new ProcessBuilder();
+			String script = "netstat -tnlp | grep :" + port;
+			builder.command("bash", "-c", script);
+			//				builder.command(kafkaTopicsScript + " --list --bootstrap-server " + kafkaBootstrapServer);
+
+			//				builder.command(kafkaTopicsScript, "--list", "--bootstrap-server", kafkaBootstrapServer);
+
+			builder.directory(new File("."));
+			Process checkPortProcess = builder.start();
+
+			AtomicBoolean portRunning = new AtomicBoolean(false);
+
+
+			int exitVal = checkPortProcess.waitFor();
+			if (exitVal == 0) {
+				reader = new BufferedReader(new InputStreamReader(checkPortProcess.getInputStream()));
+				reader.lines().forEach(line -> {
+					if (StringUtils.contains(line, "LISTEN")) {
+						portRunning.set(true);
+						LOG.info(">>> Success!!! portRunning.set(true)");
+					}
+				});
+				reader.close();
+
+				LOG.info(">>> Success!!! portRunning={}", portRunning.get());
+			} else {
+				LOG.error(">>> Error!!!  exitcode={}", exitVal);
+
+
+			}
+			if (checkPortProcess.isAlive()) {
+				checkPortProcess.destroy();
+			}
+
+			return portRunning.get();
+		} finally {
+			if (reader != null) reader.close();
+		}
+
+
+
+	}
 	private void destroyConnector() {
 		if (connectorStartProcess != null) {
 			LOG.warn(" >>> connectorStartProcess ");
